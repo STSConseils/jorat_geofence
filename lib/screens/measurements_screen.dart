@@ -119,6 +119,7 @@ class _MeasurementsScreenState extends State<MeasurementsScreen> {
                                   DataColumn(label: Text('Longitude')),
                                   DataColumn(label: Text('Heure')),
                                   DataColumn(label: Text('Précision')),
+                                  DataColumn(label: Text('Qualité')),
                                   DataColumn(label: Text('Réseau')),
                                   DataColumn(label: Text('Aide réseau')),
                                 ],
@@ -142,6 +143,7 @@ class _MeasurementsScreenState extends State<MeasurementsScreen> {
                                           sample.accuracyMeters.toStringAsFixed(2),
                                         ),
                                       ),
+                                      DataCell(Text(sample.quality)),
                                       DataCell(
                                         Text(sample.wasNetworkAvailable ? 'Oui' : 'Non'),
                                       ),

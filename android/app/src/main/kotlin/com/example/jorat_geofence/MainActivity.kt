@@ -1,6 +1,8 @@
 package com.example.jorat_geofence
 
+import android.content.ContentUris
 import android.content.ContentValues
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -44,6 +46,14 @@ class MainActivity : FlutterActivity() {
         val resolver = applicationContext.contentResolver
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val existingUri = findExistingDownloadUri(safeName)
+            if (existingUri != null) {
+                resolver.openOutputStream(existingUri, "wt")?.use { stream ->
+                    stream.write(content.toByteArray(Charsets.UTF_8))
+                } ?: throw IllegalStateException("Impossible d'écrire le fichier CSV existant")
+                return existingUri.toString()
+            }
+
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, safeName)
                 put(MediaStore.MediaColumns.MIME_TYPE, "text/csv")
@@ -80,5 +90,28 @@ class MainActivity : FlutterActivity() {
         val file = File(downloadsDir, safeName)
         file.writeText(content, Charsets.UTF_8)
         return file.absolutePath
+    }
+
+    private fun findExistingDownloadUri(fileName: String): Uri? {
+        val resolver = applicationContext.contentResolver
+        val projection = arrayOf(MediaStore.MediaColumns._ID)
+        val selection = "${MediaStore.MediaColumns.DISPLAY_NAME} = ?"
+        val selectionArgs = arrayOf(fileName)
+
+        resolver.query(
+            MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+            projection,
+            selection,
+            selectionArgs,
+            "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val idColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
+                val id = cursor.getLong(idColumn)
+                return ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, id)
+            }
+        }
+
+        return null
     }
 }
