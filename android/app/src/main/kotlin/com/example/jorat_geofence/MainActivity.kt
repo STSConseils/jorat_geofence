@@ -3,9 +3,12 @@ package com.example.jorat_geofence
 import android.content.ContentUris
 import android.content.Context
 import android.content.ContentValues
+import android.content.Intent
+import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -75,6 +78,18 @@ class MainActivity : FlutterActivity() {
                                     "declaredNetworkType" to "unknown",
                                     "signalDbm" to null,
                                     "voiceCapable" to null
+                                )
+                            )
+                        }
+                    }
+                    "getBatterySnapshot" -> {
+                        try {
+                            result.success(getBatterySnapshot())
+                        } catch (_: Exception) {
+                            result.success(
+                                mapOf(
+                                    "batteryLevelPercent" to null,
+                                    "isCharging" to null
                                 )
                             )
                         }
@@ -372,6 +387,33 @@ class MainActivity : FlutterActivity() {
         return value
     }
 
+    private fun getBatterySnapshot(): Map<String, Any?> {
+        val intent = registerReceiver(
+            null,
+            IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+        ) ?: return mapOf(
+            "batteryLevelPercent" to null,
+            "isCharging" to null
+        )
+
+        val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+        val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+        val batteryLevelPercent = if (level >= 0 && scale > 0) {
+            (level.toDouble() * 100.0) / scale.toDouble()
+        } else {
+            null
+        }
+
+        val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+        val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+            status == BatteryManager.BATTERY_STATUS_FULL
+
+        return mapOf(
+            "batteryLevelPercent" to batteryLevelPercent,
+            "isCharging" to isCharging
+        )
+    }
+
     private fun getMobileGeneration(): String {
         val telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
             ?: return "mobile"
@@ -382,17 +424,24 @@ class MainActivity : FlutterActivity() {
             0
         }
 
-        if (networkType == 0) {
-            val serviceStateText = try {
-                telephonyManager.serviceState?.toString()?.lowercase()
-            } catch (_: Exception) {
-                null
-            } ?: ""
+        val serviceStateText = try {
+            telephonyManager.serviceState?.toString()?.lowercase()
+        } catch (_: Exception) {
+            null
+        } ?: ""
 
-            if (serviceStateText.contains("nrstate=connected") ||
-                serviceStateText.contains("nrstate=not_restricted")) {
-                return "5g"
-            }
+        val hasNrState = serviceStateText.contains("nrstate=connected") ||
+            serviceStateText.contains("nrstate=not_restricted")
+        val hasEndcAvailable = serviceStateText.contains("isendcavailable=true") ||
+            serviceStateText.contains("endcavailable=true")
+        val hasNrCell = hasNrCellInfo(telephonyManager)
+
+        if (networkType == 20 || hasNrState || (hasEndcAvailable && hasNrCell)) {
+            Log.d(
+                TAG,
+                "5G detected networkType=$networkType nrState=$hasNrState endc=$hasEndcAvailable nrCell=$hasNrCell"
+            )
+            return "5g"
         }
 
         return when (networkType) {
@@ -403,6 +452,15 @@ class MainActivity : FlutterActivity() {
             20 -> "5g" // NR
 
             else -> "mobile"
+        }
+    }
+
+    private fun hasNrCellInfo(telephonyManager: TelephonyManager): Boolean {
+        return try {
+            val infos = telephonyManager.allCellInfo ?: emptyList()
+            infos.any { it is CellInfoNr }
+        } catch (_: Exception) {
+            false
         }
     }
 }

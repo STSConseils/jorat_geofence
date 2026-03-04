@@ -135,7 +135,7 @@ class TrackingController extends ChangeNotifier {
   String _buildCsv(List<LocationSample> samples) {
     final buffer = StringBuffer()
       ..writeln(
-        'measured_at_utc,latitude,longitude,accuracy,quality,altitude_m,speed_mps,heading_deg,is_mocked,network_available,network_type,network_assisted,declared_network_type,signal_dbm,voice_capable,network_usage,tcp_latency_median_ms,downlink_kbps',
+        'measured_at_utc,latitude,longitude,accuracy,quality,altitude_m,speed_mps,heading_deg,is_mocked,network_available,network_type,network_assisted,battery_level_percent,battery_charging,declared_network_type,signal_dbm,voice_capable,network_usage,tcp_latency_median_ms,downlink_mbps',
       );
 
     for (final sample in samples) {
@@ -153,12 +153,14 @@ class TrackingController extends ChangeNotifier {
         sample.wasNetworkAvailable ? 'yes' : 'no',
         sample.networkType,
         sample.usedNetworkAssisted ? 'yes' : 'no',
+        _num(sample.batteryLevelPercent),
+        _boolYesNoNullable(sample.isCharging),
         network?.declaredNetworkType ?? '',
         network?.signalDbm?.toString() ?? '',
         _boolYesNoNullable(network?.voiceCapable),
         network?.usageLabel ?? '',
         _num(network?.tcpLatencyMedianMs),
-        _num(network?.downlinkKbps),
+        _num(_kbpsToMbps(network?.downlinkKbps)),
       ].join(','));
     }
 
@@ -248,6 +250,11 @@ class TrackingController extends ChangeNotifier {
   }
 
   String _num(double? value) => value == null ? '' : value.toStringAsFixed(2);
+
+  double? _kbpsToMbps(double? valueKbps) {
+    if (valueKbps == null) return null;
+    return valueKbps / 1000.0;
+  }
 
   String _boolYesNoNullable(bool? value) {
     if (value == null) return '';

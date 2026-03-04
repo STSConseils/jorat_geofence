@@ -196,12 +196,14 @@ class _MeasurementsScreenState extends State<MeasurementsScreen> {
                                     DataColumn(label: Text('Qualite')),
                                     DataColumn(label: Text('Reseau')),
                                     DataColumn(label: Text('Aide reseau')),
+                                    DataColumn(label: Text('Batterie %')),
+                                    DataColumn(label: Text('Charge')),
                                     DataColumn(label: Text('Radio')),
                                     DataColumn(label: Text('Signal dBm')),
                                     DataColumn(label: Text('Voix')),
                                     DataColumn(label: Text('Usage')),
                                     DataColumn(label: Text('Latence ms')),
-                                    DataColumn(label: Text('Debit kbps')),
+                                    DataColumn(label: Text('Debit Mbps')),
                                   ],
                                   rows: samples.asMap().entries.map((entry) {
                                     final index = entry.key;
@@ -239,6 +241,16 @@ class _MeasurementsScreenState extends State<MeasurementsScreen> {
                                         ),
                                         DataCell(
                                           Text(
+                                            _formatMetric(
+                                              sample.batteryLevelPercent,
+                                            ),
+                                          ),
+                                        ),
+                                        DataCell(
+                                          Text(_boolToOuiNon(sample.isCharging)),
+                                        ),
+                                        DataCell(
+                                          Text(
                                             _formatNetworkType(
                                               network?.declaredNetworkType ??
                                                   sample.networkType,
@@ -258,7 +270,11 @@ class _MeasurementsScreenState extends State<MeasurementsScreen> {
                                           Text(_formatMetric(network?.tcpLatencyMedianMs)),
                                         ),
                                         DataCell(
-                                          Text(_formatMetric(network?.downlinkKbps)),
+                                          Text(
+                                            _formatMetric(
+                                              _kbpsToMbps(network?.downlinkKbps),
+                                            ),
+                                          ),
                                         ),
                                       ],
                                     );
@@ -320,7 +336,7 @@ class _MeasurementsScreenState extends State<MeasurementsScreen> {
     try {
       final buffer = StringBuffer()
         ..writeln(
-          'measured_at_utc,latitude,longitude,accuracy,altitude_m,speed_mps,heading_deg,is_mocked,network_available,network_type,network_assisted,declared_network_type,signal_dbm,voice_capable,network_usage,tcp_latency_median_ms,downlink_kbps',
+          'measured_at_utc,latitude,longitude,accuracy,altitude_m,speed_mps,heading_deg,is_mocked,network_available,network_type,network_assisted,battery_level_percent,battery_charging,declared_network_type,signal_dbm,voice_capable,network_usage,tcp_latency_median_ms,downlink_mbps',
         );
 
       for (final sample in samples) {
@@ -337,12 +353,14 @@ class _MeasurementsScreenState extends State<MeasurementsScreen> {
           sample.wasNetworkAvailable ? 'yes' : 'no',
           sample.networkType,
           sample.usedNetworkAssisted ? 'yes' : 'no',
+          _num(sample.batteryLevelPercent),
+          _boolToYesNo(sample.isCharging),
           network?.declaredNetworkType ?? '',
           network?.signalDbm?.toString() ?? '',
           _boolToYesNo(network?.voiceCapable),
           network?.usageLabel ?? '',
           _num(network?.tcpLatencyMedianMs),
-          _num(network?.downlinkKbps),
+          _num(_kbpsToMbps(network?.downlinkKbps)),
         ].join(','));
       }
 
@@ -375,6 +393,11 @@ class _MeasurementsScreenState extends State<MeasurementsScreen> {
   }
 
   String _num(double? value) => value == null ? '' : value.toStringAsFixed(2);
+
+  double? _kbpsToMbps(double? valueKbps) {
+    if (valueKbps == null) return null;
+    return valueKbps / 1000.0;
+  }
 
   String _formatMetric(double? value) {
     if (value == null) return '';

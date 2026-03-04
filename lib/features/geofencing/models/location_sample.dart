@@ -12,6 +12,8 @@ class LocationSample {
   final bool wasNetworkAvailable;
   final bool usedNetworkAssisted;
   final String networkType;
+  final double? batteryLevelPercent;
+  final bool? isCharging;
   final NetworkMeasurement? networkMeasurement;
 
   const LocationSample({
@@ -23,6 +25,8 @@ class LocationSample {
     required this.wasNetworkAvailable,
     required this.usedNetworkAssisted,
     required this.networkType,
+    this.batteryLevelPercent,
+    this.isCharging,
     this.networkMeasurement,
     this.altitudeMeters,
     this.speedMps,

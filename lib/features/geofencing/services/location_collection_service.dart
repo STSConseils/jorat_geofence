@@ -12,12 +12,23 @@ import '../models/network_measurement.dart';
 
 class LocationCollectionService {
   static const MethodChannel _networkChannel = MethodChannel('jorat/network');
+  static const int _tcpAttemptsPerHost = 4;
+  static const int _tcpWarmupAttemptsPerHost = 1;
+  static const Duration _tcpProbeTimeout = Duration(seconds: 3);
   static const List<String> _tcpProbeHosts = ['8.8.8.8', '1.1.1.1', '9.9.9.9'];
-  static const List<String> _downlinkProbeUrls = [
-    'https://speed.cloudflare.com/__down?bytes=50000',
-    'https://proof.ovh.net/files/100Kb.dat',
+  static const int _downlinkAttemptsPerEndpoint = 1;
+  static const int _downlinkParallelStreams = 2;
+  static const List<String> _downlinkProbeUrlTemplates = [
+    'https://speed.cloudflare.com/__down?bytes={bytes}',
+    'https://proof.ovh.net/files/1Mb.dat',
   ];
-  static const int _downlinkProbeTargetBytes = 50 * 1024;
+  static const Duration _downlinkProbeTimeout = Duration(seconds: 16);
+  static const int _downlinkProbeWarmupBytes = 256 * 1024;
+  static const Duration _downlinkProbeWarmupDuration = Duration(seconds: 1);
+  static const int _downlinkProbeMinBytes = 1024 * 1024;
+  static const int _downlinkProbeMaxBytes = 6 * 1024 * 1024;
+  static const Duration _downlinkProbeMaxTransferDuration =
+      Duration(seconds: 10);
 
   final Duration interval;
   final Duration fixWindow;
@@ -162,8 +173,10 @@ class LocationCollectionService {
       final measuredAt = DateTime.now().toUtc();
       final networkSnapshotFuture = _readNetworkSnapshot();
       final networkMeasurementFuture = _readNetworkMeasurement();
+      final batterySnapshotFuture = _readBatterySnapshot();
       final networkSnapshot = await networkSnapshotFuture;
       final networkMeasurement = await networkMeasurementFuture;
+      final batterySnapshot = await batterySnapshotFuture;
       final usedNetworkAssisted = _useNetworkAssisted;
 
       _sampleController.add(
@@ -179,6 +192,8 @@ class LocationCollectionService {
           wasNetworkAvailable: networkSnapshot.available,
           usedNetworkAssisted: usedNetworkAssisted,
           networkType: networkSnapshot.type,
+          batteryLevelPercent: batterySnapshot?.levelPercent,
+          isCharging: batterySnapshot?.isCharging,
           networkMeasurement: networkMeasurement,
         ),
       );
@@ -194,6 +209,8 @@ class LocationCollectionService {
         'tcp=${networkMeasurement?.tcpLatencyMedianMs}, '
         'down=${networkMeasurement?.downlinkKbps}, '
         'usage=${networkMeasurement?.usageLabel}, '
+        'battery=${batterySnapshot?.levelPercent}, '
+        'charging=${batterySnapshot?.isCharging}, '
         'assisted=$usedNetworkAssisted',
       );
     } catch (e) {
@@ -371,6 +388,27 @@ class LocationCollectionService {
     );
   }
 
+  Future<_BatterySnapshot?> _readBatterySnapshot() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
+      return null;
+    }
+
+    try {
+      final result = await _networkChannel.invokeMapMethod<String, dynamic>(
+        'getBatterySnapshot',
+      );
+      if (result == null) return null;
+
+      final level = _toDoubleOrNull(result['batteryLevelPercent']);
+      final charging = result['isCharging'] as bool?;
+
+      if (level == null && charging == null) return null;
+      return _BatterySnapshot(levelPercent: level, isCharging: charging);
+    } on PlatformException {
+      return null;
+    }
+  }
+
   Future<_RadioSnapshot?> _readRadioSnapshot() async {
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
       return null;
@@ -401,10 +439,10 @@ class LocationCollectionService {
   Future<double?> _probeTcpLatencyMedianMs() async {
     final futures = _tcpProbeHosts
         .map(
-          (host) => _probeTcpHostLatencyMs(
+          (host) => _probeTcpHostMedianLatencyMs(
             host: host,
             port: 53,
-            timeout: const Duration(seconds: 2),
+            timeout: _tcpProbeTimeout,
           ),
         )
         .toList();
@@ -413,6 +451,28 @@ class LocationCollectionService {
     final valid = samples.whereType<double>().toList()..sort();
     if (valid.isEmpty) return null;
     return _median(valid);
+  }
+
+  Future<double?> _probeTcpHostMedianLatencyMs({
+    required String host,
+    required int port,
+    required Duration timeout,
+  }) async {
+    final values = <double>[];
+    final totalAttempts = _tcpWarmupAttemptsPerHost + _tcpAttemptsPerHost;
+    for (var i = 0; i < totalAttempts; i++) {
+      final value = await _probeTcpHostLatencyMs(
+        host: host,
+        port: port,
+        timeout: timeout,
+      );
+      if (i >= _tcpWarmupAttemptsPerHost && value != null) {
+        values.add(value);
+      }
+    }
+    if (values.isEmpty) return null;
+    values.sort();
+    return _median(values);
   }
 
   Future<double?> _probeTcpHostLatencyMs({
@@ -434,21 +494,82 @@ class LocationCollectionService {
   }
 
   Future<double?> _probeDownlinkKbps() async {
-    for (final url in _downlinkProbeUrls) {
-      final kbps = await _measureDownlinkKbps(
-        url: url,
-        timeout: const Duration(seconds: 4),
-        targetBytes: _downlinkProbeTargetBytes,
-      );
-      if (kbps != null) return kbps;
+    final globalCandidates = <double>[];
+
+    for (final template in _downlinkProbeUrlTemplates) {
+      final endpointCandidates = <double>[];
+
+      for (var attempt = 0; attempt < _downlinkAttemptsPerEndpoint; attempt++) {
+        final kbps = await _measureParallelDownlinkKbps(
+          url: _resolveDownlinkProbeUrl(template, _downlinkProbeMaxBytes),
+          timeout: _downlinkProbeTimeout,
+          minBytes: _downlinkProbeMinBytes,
+          maxBytes: _downlinkProbeMaxBytes,
+          maxTransferDuration: _downlinkProbeMaxTransferDuration,
+        );
+        if (kbps != null) {
+          endpointCandidates.add(kbps);
+        }
+      }
+
+      if (endpointCandidates.isNotEmpty) {
+        endpointCandidates.sort();
+        final endpointBest = endpointCandidates.last;
+        globalCandidates.add(endpointBest);
+        developer.log(
+          '[LocationCollectionService] downlink endpoint best '
+          'template=$template kbps=$endpointBest',
+        );
+      }
     }
-    return null;
+
+    if (globalCandidates.isEmpty) return null;
+    globalCandidates.sort();
+    return globalCandidates.last;
+  }
+
+  String _resolveDownlinkProbeUrl(String template, int bytes) {
+    return template.replaceAll('{bytes}', bytes.toString());
+  }
+
+  Future<double?> _measureParallelDownlinkKbps({
+    required String url,
+    required Duration timeout,
+    required int minBytes,
+    required int maxBytes,
+    required Duration maxTransferDuration,
+  }) async {
+    final futures = <Future<double?>>[];
+    for (var i = 0; i < _downlinkParallelStreams; i++) {
+      futures.add(
+        _measureDownlinkKbps(
+          url: _appendCacheBust(url, i),
+          timeout: timeout,
+          minBytes: minBytes,
+          maxBytes: maxBytes,
+          maxTransferDuration: maxTransferDuration,
+          logResult: i == 0,
+        ),
+      );
+    }
+
+    final values = (await Future.wait<double?>(futures)).whereType<double>().toList();
+    if (values.isEmpty) return null;
+    return values.reduce((a, b) => a + b);
+  }
+
+  String _appendCacheBust(String url, int streamIndex) {
+    final sep = url.contains('?') ? '&' : '?';
+    return '$url${sep}cb=${DateTime.now().microsecondsSinceEpoch}_$streamIndex';
   }
 
   Future<double?> _measureDownlinkKbps({
     required String url,
     required Duration timeout,
-    required int targetBytes,
+    required int minBytes,
+    required int maxBytes,
+    required Duration maxTransferDuration,
+    bool logResult = true,
   }) async {
     final client = HttpClient()
       ..connectionTimeout = timeout
@@ -461,7 +582,7 @@ class LocationCollectionService {
       request.headers.set(HttpHeaders.acceptEncodingHeader, 'identity');
       request.headers.set(
         HttpHeaders.rangeHeader,
-        'bytes=0-${targetBytes - 1}',
+        'bytes=0-${maxBytes - 1}',
       );
 
       final response = await request.close().timeout(timeout);
@@ -471,29 +592,55 @@ class LocationCollectionService {
 
       var received = 0;
       final transferStopwatch = Stopwatch();
+      final measurementStopwatch = Stopwatch();
+      var measurementStartBytes = 0;
+      var measuredBytes = 0;
       await for (final chunk in response.timeout(timeout)) {
         if (!transferStopwatch.isRunning) {
           transferStopwatch.start();
         }
         received += chunk.length;
-        if (received >= targetBytes) {
+
+        // Ignore early ramp-up bytes/time before computing throughput.
+        if (!measurementStopwatch.isRunning &&
+            (received >= _downlinkProbeWarmupBytes ||
+                transferStopwatch.elapsed >= _downlinkProbeWarmupDuration)) {
+          measurementStopwatch.start();
+          measurementStartBytes = received;
+        }
+
+        if (measurementStopwatch.isRunning) {
+          measuredBytes = received - measurementStartBytes;
+        }
+
+        if (received >= maxBytes) {
+          break;
+        }
+        if (measurementStopwatch.isRunning &&
+            measurementStopwatch.elapsed >= maxTransferDuration &&
+            measuredBytes >= minBytes) {
           break;
         }
       }
       if (transferStopwatch.isRunning) {
         transferStopwatch.stop();
       }
+      if (measurementStopwatch.isRunning) {
+        measurementStopwatch.stop();
+      }
 
-      if (received <= 0) return null;
-      final seconds = transferStopwatch.elapsedMicroseconds / 1000000.0;
+      if (measuredBytes <= 0) return null;
+      final seconds = measurementStopwatch.elapsedMicroseconds / 1000000.0;
       if (seconds <= 0) return null;
 
-      final kbps = (received * 8.0) / 1000.0 / seconds;
+      final kbps = (measuredBytes * 8.0) / 1000.0 / seconds;
       if (kbps.isNaN || kbps.isInfinite) return null;
-      developer.log(
-        '[LocationCollectionService] downlink probe url=$url bytes=$received '
-        'seconds=$seconds kbps=$kbps',
-      );
+      if (logResult) {
+        developer.log(
+          '[LocationCollectionService] downlink probe url=$url rawBytes=$received '
+          'measuredBytes=$measuredBytes seconds=$seconds kbps=$kbps',
+        );
+      }
       return kbps;
     } catch (_) {
       return null;
@@ -515,6 +662,13 @@ class LocationCollectionService {
     if (value is int) return value;
     if (value is num) return value.toInt();
     if (value is String) return int.tryParse(value);
+    return null;
+  }
+
+  double? _toDoubleOrNull(dynamic value) {
+    if (value is double) return value;
+    if (value is num) return value.toDouble();
+    if (value is String) return double.tryParse(value);
     return null;
   }
 
@@ -579,5 +733,15 @@ class _RadioSnapshot {
     required this.declaredNetworkType,
     required this.signalDbm,
     required this.voiceCapable,
+  });
+}
+
+class _BatterySnapshot {
+  final double? levelPercent;
+  final bool? isCharging;
+
+  const _BatterySnapshot({
+    required this.levelPercent,
+    required this.isCharging,
   });
 }
